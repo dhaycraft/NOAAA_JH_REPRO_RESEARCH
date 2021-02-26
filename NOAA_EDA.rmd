@@ -1,0 +1,125 @@
+---
+title: "NOAA Exploration"
+author: "David Haycraft"
+date: "2/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+## Synopsis
+
+Sever Weather Events happen with an alarming frequency. In the United 
+
+
+## Data Processing
+
+<p> The data was loaded directly from the NOAA Storm data website and was then read in as csv.</p>
+
+
+```{r, cache=TRUE}
+
+temp <- tempfile()
+download.file("https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2",temp)
+noaa_df <- read.csv(temp, header=TRUE)
+file.remove(temp)
+```
+<p> ***Preprocessing for Events:*** </p>
+- Normalize strings by using make all letters upper case and trim white space
+- Remove punctuation and replace with spaces
+- Remove numbers
+- Convert TSTM abbreviation to THUNDERSTORM
+
+<p> Each serves to cleanse the text before we attempt fuzzy matching and semantic similarity matching. When the above is complete in order to reduce the noise in the EVTYPE variable we will find the distance between all unique EVTYPEs for string distance and semantic similarity based on the Universal Sentence Encoder from Google. After calculating each we will take the average of the two distances. This average distance will then be used as an input to hierarchical clustering. Finely, after experimenting with different heights for cutting the dendogram produced by hierarchical clustering a value of .6 was used to create 78</p>
+
+
+
+
+```{r}
+library(dplyr)
+library(stringdist)
+library(tidyr)
+library(tfhub)
+library(plotly)
+library(ggplot2)
+
+embeddings <- tfhub::hub_load("https://tfhub.dev/google/universal-sentence-encoder/4")
+noaa_df <- noaa_df %>% mutate(EVTYPE = toupper(trimws(EVTYPE, which="both")),
+                              EVTYPE=gsub("[0-9]", "", EVTYPE),
+                              EVTYPE = gsub("[[:punct:]]", " ", EVTYPE),
+                              EVTYPE = gsub("TSTM", "THUNDERSTORM", EVTYPE))
+
+scale_zero_one <- function(x){
+  max_val <- max(x)
+  min_val <- min(x)
+  (x-min_val)/(max_val-min_val)
+}
+
+
+unique_events <- unique(noaa_df$EVTYPE)
+embed_unique <- as.data.frame(as.matrix(embeddings(as.array(unique_events))))
+dist_embed <- dist(embed_unique)
+dist_embed_scale <- scale_zero_one(dist_embed)
+dist_events <- stringdistmatrix(unique_events)
+dist_events_scale <- scale_zero_one(dist_events)
+
+dist_avg <- (dist_embed_scale+dist_events_scale)/2
+
+event_clust <- hclust(dist_avg)
+plot(event_clust)
+cut_labs <- cutree(event_clust, h=.6)
+event_groups <- data.frame(cut_labs, unique_events) %>% arrange(cut_labs)
+
+event_freq <- noaa_df %>% group_by(EVTYPE) %>%
+                          summarise(cnt = n())
+
+
+event_grp_cnts <- left_join(event_groups, event_freq, by=c("unique_events"="EVTYPE"))
+
+max_event_by_group <- event_grp_cnts %>% group_by(cut_labs) %>% 
+                                         arrange(desc(cnt)) %>%
+                                         filter(row_number()==1) %>%
+                                         select(unique_events, cut_labs) %>%
+                                         rename(grp_event = unique_events)
+
+events_map <- left_join(event_grp_cnts, max_event_by_group, by=c("cut_labs"="cut_labs")) %>%
+                  select(unique_events, grp_event)
+
+
+noaa_df <- left_join(noaa_df, events_map, by=c("EVTYPE"="unique_events"))
+
+
+human_damage <- noaa_df %>% group_by(grp_event) %>%
+                            summarise(TOT_FATAL= sum(FATALITIES, na.rm=TRUE),
+                                      TOT_INJURED = sum(INJURIES, na.rm=TRUE))
+
+
+fatal_damage <- human_damage %>% filter(TOT_FATAL!=0) %>%
+                                 arrange(desc(TOT_FATAL)) %>%
+                                 top_n(20)
+
+
+fatal_damage$grp_event <- factor(fatal_damage$grp_event, levels=fatal_damage$grp_event)
+
+fatal_plot <-  ggplotly(ggplot(fatal_damage, aes(grp_event, TOT_FATAL)) +
+                  geom_bar(stat = 'identity')+
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+                  labs(title="Top 20 Weather Events by Number of Fatalities", 
+                       x="Weather Event", 
+                       y="Total Fatalities"))
+
+
+```
+
+
+
+## Results
+
+
+
+```{r}
+
+fatal_plot
+```
