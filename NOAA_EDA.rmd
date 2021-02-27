@@ -1,5 +1,5 @@
 ---
-title: "NOAA Exploration"
+title: "Measuring the impact of weather events on human populations and the economy"
 author: "David Haycraft"
 date: "2/25/2021"
 output: html_document
@@ -11,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
 
 ## Synopsis
 
-Sever Weather Events happen with an alarming frequency. In the United 
+Sever Weather Events happen with an alarming frequency. In the United States NOAA tracks the damage in terms of human damage and economic damage. The data was consolidated into groups using a combination of string similarity and semantic similarity to identify the top weather events related to property damage and population health. There are important regional factors that may be related to the occurrence but according to this study tornado events are the most severe in terms of fatalities and injuries by a wide margin. A more predictable and possibly easier to control event is deaths from heat and excessive heat which were the second and third most common events related to fatalities. Flooding causes the most damage of all weather events to property. Finally, top cause of crop damage is drought by a very wide margin.
 
 
 ## Data Processing
@@ -32,8 +32,17 @@ file.remove(temp)
 - Remove numbers
 - Convert TSTM abbreviation to THUNDERSTORM
 
-<p> Each serves to cleanse the text before we attempt fuzzy matching and semantic similarity matching. When the above is complete in order to reduce the noise in the EVTYPE variable we will find the distance between all unique EVTYPEs for string distance and semantic similarity based on the Universal Sentence Encoder from Google. After calculating each we will take the average of the two distances. This average distance will then be used as an input to hierarchical clustering. Finely, after experimenting with different heights for cutting the dendogram produced by hierarchical clustering a value of .6 was used to create 78</p>
+<p> Each serves to cleanse the text before we attempt fuzzy matching and semantic similarity matching. When the above is complete in order to reduce the noise in the EVTYPE variable we will find the distance between all unique EVTYPEs for string distance and semantic similarity based on the Universal Sentence Encoder from Google. After calculating each of the distance matrices was normalized to have distances scaled from 0 to 1. Now since the two distances distances are on the same scale we will take average distance will then be used as an input to hierarchical clustering. Finally, after experimenting with different heights for cutting the dendogram produced by hierarchical clustering it will be used to consolidate groups that are like one another.  Once the groups are established the most frequently appearing member of each group is designated as the label for the groups.</p>
 
+<p> ***Preprocess for property and crop damage exponents***:</p>
+- "K" indicates $10^3$
+- "m" indicates $10^6$
+- "b" indicates $10^9$
+- any numeric $x$ is converted to $10^x$
+- all other values are converted to $10^0$
+
+<p> The for each damage value y and exponential value x converted to its true damage value using the following equation:</p> 
+$$y*10^x$$
 
 
 
@@ -44,6 +53,10 @@ library(tidyr)
 library(tfhub)
 library(plotly)
 library(ggplot2)
+library(DT)
+library(gridExtra)
+
+# need to install tensorflow-hub into the conda environment
 
 embeddings <- tfhub::hub_load("https://tfhub.dev/google/universal-sentence-encoder/4")
 noaa_df <- noaa_df %>% mutate(EVTYPE = toupper(trimws(EVTYPE, which="both")),
@@ -62,13 +75,15 @@ unique_events <- unique(noaa_df$EVTYPE)
 embed_unique <- as.data.frame(as.matrix(embeddings(as.array(unique_events))))
 dist_embed <- dist(embed_unique)
 dist_embed_scale <- scale_zero_one(dist_embed)
-dist_events <- stringdistmatrix(unique_events)
+#find the length of the longer of two strings in each pair
+pwmax <- combn(nchar(unique_events),2,max,simplify = T)
+dist_events <- stringdistmatrix(unique_events)/pwmax
 dist_events_scale <- scale_zero_one(dist_events)
 
 dist_avg <- (dist_embed_scale+dist_events_scale)/2
 
 event_clust <- hclust(dist_avg)
-plot(event_clust)
+# plot(event_clust)
 cut_labs <- cutree(event_clust, h=.6)
 event_groups <- data.frame(cut_labs, unique_events) %>% arrange(cut_labs)
 
@@ -91,6 +106,23 @@ events_map <- left_join(event_grp_cnts, max_event_by_group, by=c("cut_labs"="cut
 noaa_df <- left_join(noaa_df, events_map, by=c("EVTYPE"="unique_events"))
 
 
+noaa_df <- noaa_df %>% mutate(CROPDMGEXP = toupper(CROPDMGEXP),
+                              PROPDMGEXP = toupper(PROPDMGEXP),
+                              CROPDMGEXP = case_when(CROPDMGEXP=="B"~9,
+                                                     CROPDMGEXP=="M"~6,
+                                                     CROPDMGEXP=="K"~3,
+                                                     TRUE~0),
+                              PROPDMGEXP = case_when(PROPDMGEXP=="B"~9,
+                                                     PROPDMGEXP=="M"~6,
+                                                     PROPDMGEXP=="K"~3,
+                                                     is.numeric(as.numeric(PROPDMGEXP))~as.numeric(PROPDMGEXP),
+                                                     TRUE~0),
+                              CROPDMG = CROPDMG*10^CROPDMGEXP,
+                              PROPDMG = PROPDMG*10^PROPDMGEXP)
+
+
+
+
 human_damage <- noaa_df %>% group_by(grp_event) %>%
                             summarise(TOT_FATAL= sum(FATALITIES, na.rm=TRUE),
                                       TOT_INJURED = sum(INJURIES, na.rm=TRUE))
@@ -103,23 +135,92 @@ fatal_damage <- human_damage %>% filter(TOT_FATAL!=0) %>%
 
 fatal_damage$grp_event <- factor(fatal_damage$grp_event, levels=fatal_damage$grp_event)
 
-fatal_plot <-  ggplotly(ggplot(fatal_damage, aes(grp_event, TOT_FATAL)) +
+fatal_plot <-  ggplot(fatal_damage, aes(grp_event, TOT_FATAL)) +
                   geom_bar(stat = 'identity')+
                   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
                   labs(title="Top 20 Weather Events by Number of Fatalities", 
                        x="Weather Event", 
-                       y="Total Fatalities"))
+                       y="Total Fatalities")
+
+
+
+injury_damage <- human_damage %>% filter(TOT_INJURED!=0) %>%
+                                 arrange(desc(TOT_INJURED)) %>%
+                                 top_n(20)
+
+
+injury_damage$grp_event <- factor(injury_damage$grp_event, levels=injury_damage$grp_event)
+
+injury_plot <-  ggplot(injury_damage, aes(grp_event, TOT_INJURED)) +
+                  geom_bar(stat = 'identity')+
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+                  labs(title="Top 20 Weather Events by Number Injured", 
+                       x="Weather Event", 
+                       y="Total Injured")
+
+
+econ_damage <- noaa_df %>% group_by(grp_event) %>%
+                            summarise(TOT_PROPDMG= sum(PROPDMG, na.rm=TRUE),
+                                      TOT_CROPDMG = sum(CROPDMG, na.rm=TRUE))
+
+
+prop_damage <- econ_damage %>% filter(TOT_PROPDMG!=0) %>%
+                                 arrange(desc(TOT_PROPDMG)) %>%
+                                 top_n(20)
+
+
+prop_damage$grp_event <- factor(prop_damage$grp_event, levels=prop_damage$grp_event)
+
+prop_damage_plot <-  ggplot(prop_damage, aes(grp_event, TOT_PROPDMG)) +
+                  geom_bar(stat = 'identity')+
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+                  labs(x="Weather Event", 
+                       y="Total Property Damage")
+
+
+
+
+crop_damage <- econ_damage %>% filter(TOT_CROPDMG!=0) %>%
+                                 arrange(desc(TOT_CROPDMG)) %>%
+                                 top_n(20)
+
+
+crop_damage$grp_event <- factor(crop_damage$grp_event, levels=crop_damage$grp_event)
+
+crop_damage_plot <-  ggplot(crop_damage, aes(grp_event, TOT_CROPDMG)) +
+                  geom_bar(stat = 'identity')+
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+                  labs(x="Weather Event", 
+                       y="Total Crop Damage")
+
 
 
 ```
 
+```{r, fig.cap="Table 1: Original EVTYPE(unique_events) mapped to the event grouping as created by semantic and string distance clustering"}
+datatable(events_map)
+```
 
 
 ## Results
 
+### Harmful effects on Population
 
+The primary danger in terms of fatalities and injuries to the population is tornado events. This is likely due to the unexpected nature of tornadoes whereas other powerful weather events may be more predictable and allow for people to plan ahead for their safety. The heat/excessive heat should be of high concern as well since they are the 2nd most common causes of fatalities. This statistic reminds us of the dangers even during seemingly "nice" weather events heat waves can take a toll in terms of human life more frequently than many types of inclement weather.
 
-```{r}
-
-fatal_plot
+```{r, fig.width=15, fig.height=7, fig.cap='Figure 2: Barplot of top 20 weather events by total property damage (left), Barplot of total crop damage by top 20 weather events (right)'}
+grid.arrange(fatal_plot, injury_plot, ncol=2)
 ```
+
+### Economic Harm
+
+The top three cause of property damage are flooding, hurricanes, and tornadoes. Each these come from the most violent forms of weather events so it is no surprise that they causes the most total property damage. Crop damage is primarily caused by drought with roughly double the second most common cause of crop damage. The rest of top five (flood, river flood, ice storm, and hurricane) are fairly close together in terms of overall total crop damage.
+
+```{r, fig.width=15, fig.height=7, fig.cap='Figure 3: Barplot of top 20 weather events by total property damage (left), Barplot of total crop damage by top 20 weather events (right)' }
+grid.arrange(prop_damage_plot, crop_damage_plot, ncol=2)
+```
+
+
+## Conclusion
+
+There are other factors that come into play in terms of regional attributes that are relevant in terms of how often any type of weather event will occur which should be a primary influence on planning for safety. These summaries of the entire US would not necessarily translate to local planning without that lens taken into account.
